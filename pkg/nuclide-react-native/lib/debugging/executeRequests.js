@@ -1,0 +1,75 @@
+/**
+ * Copyright (c) 2015-present, Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under the license found in the LICENSE file in
+ * the root directory of this source tree.
+ *
+ * @flow
+ */
+
+import type {ExecutorResponse, ExecutorRequest} from './types';
+
+import featureConfig from '../../../commons-atom/featureConfig';
+import {createProcessStream, getOutputStream} from '../../../commons-node/process';
+import {getLogger} from '../../../nuclide-logging';
+import nuclideUri from '../../../commons-node/nuclideUri';
+import child_process from 'child_process';
+import {Observable} from 'rxjs';
+
+const logger = getLogger();
+
+/**
+ * This function models the executor side of the debugging equation: it receives a stream of
+ * instructions from the RN app, executes them, and emits a stream of results.
+ */
+export function executeRequests(
+  requests: Observable<ExecutorRequest>,
+): Observable<ExecutorResponse> {
+  // Wait until we get the first request, then spawn a worker process for processing them.
+  const workerProcess = requests.first().switchMap(createWorker).share();
+
+  return workerProcess.switchMap(process => (
+    Observable.merge(
+      Observable.of({kind: 'pid', pid: process.pid}),
+
+      // The messages we're receiving from the worker process.
+      Observable.fromEvent(process, 'message'),
+
+      // Send the incoming requests to the worker process for evaluation.
+      requests.do(request => process.send(request)).ignoreElements(),
+
+      // Pipe output from forked process. This just makes things easier to debug for us.
+      getOutputStream(process)
+        .do(message => {
+          switch (message.kind) {
+            case 'error':
+              logger.error(message.error.message);
+              return;
+            case 'stderr':
+            case 'stdout':
+              logger.info(message.data.toString());
+              return;
+          }
+        })
+        .ignoreElements(),
+    )
+  ))
+    .share();
+}
+
+function createWorker(): Observable<child_process$ChildProcess> {
+  return createProcessStream(() => (
+    // TODO: The node location/path needs to be more configurable. We need to figure out a way to
+    //   handle this across the board.
+    child_process.fork(
+      nuclideUri.join(__dirname, 'executor.js'),
+      [],
+      {
+        execArgv: ['--debug-brk'],
+        execPath: ((featureConfig.get('nuclide-react-native.pathToNode'): any): string),
+        silent: true,
+      },
+    )
+  ));
+}

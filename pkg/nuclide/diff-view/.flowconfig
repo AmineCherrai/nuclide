@@ -1,9 +1,0 @@
-[include]
-
-[ignore]
-
-[libs]
-../../interfaces/atom/1.0/
-
-[options]
-
